@@ -1902,7 +1902,7 @@ impl std::fmt::Display for PubGrubHint {
             } => {
                 let earliest = if let Some(timestamp) = earliest_upload_time {
                     format!(
-                        " The earliest available version was published on {}.",
+                        " The earliest version was uploaded on {}.",
                         timestamp.cyan()
                     )
                 } else {
