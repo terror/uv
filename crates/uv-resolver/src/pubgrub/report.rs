@@ -652,6 +652,11 @@ impl PubGrubReportFormatter<'_> {
                                 package: name.clone(),
                                 per_package: options.exclude_newer.package.contains_key(name),
                                 exclude_newer,
+                                earliest_upload_time: Self::earliest_upload_time(
+                                    name,
+                                    index,
+                                    fork_indexes,
+                                ),
                             });
                         }
                     }
@@ -1077,6 +1082,46 @@ impl PubGrubReportFormatter<'_> {
             .iter()
             .any(|vm| vm.iter(&Ranges::full()).next().is_some())
     }
+
+    fn earliest_upload_time(
+        name: &PackageName,
+        index: &InMemoryIndex,
+        fork_indexes: &ForkIndexes,
+    ) -> Option<jiff::Timestamp> {
+        let response = if let Some(url) = fork_indexes.get(name).map(IndexMetadata::url) {
+            index.explicit().get(&(name.clone(), url.clone()))
+        } else {
+            index.implicit().get(name)
+        };
+
+        let VersionsResponse::Found(ref version_maps) = *response? else {
+            return None;
+        };
+
+        version_maps
+            .iter()
+            .filter_map(|version_map| {
+                version_map
+                    .iter(&Ranges::full())
+                    .filter_map(|(_, handle)| handle.prioritized_dist())
+                    .flat_map(|dist| {
+                        let wheel = match dist.incompatible_wheel() {
+                            Some(IncompatibleWheel::ExcludeNewer(Some(ts))) => Some(*ts),
+                            _ => None,
+                        };
+
+                        let source = match dist.incompatible_source() {
+                            Some(IncompatibleSource::ExcludeNewer(Some(ts))) => Some(*ts),
+                            _ => None,
+                        };
+
+                        wheel.into_iter().chain(source)
+                    })
+                    .min()
+            })
+            .min()
+            .and_then(|ms| jiff::Timestamp::from_millisecond(ms).ok())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1251,6 +1296,8 @@ pub(crate) enum PubGrubHint {
         per_package: bool,
         // excluded from `PartialEq` and `Hash`
         exclude_newer: ExcludeNewerValue,
+        // excluded from `PartialEq` and `Hash`
+        earliest_upload_time: Option<jiff::Timestamp>,
     },
     /// The resolution failed for a Python version that is different from the current Python version.
     DisjointPythonVersion {
@@ -1851,12 +1898,22 @@ impl std::fmt::Display for PubGrubHint {
                 package,
                 per_package,
                 exclude_newer,
+                earliest_upload_time,
             } => {
+                let earliest = if let Some(timestamp) = earliest_upload_time {
+                    format!(
+                        " The earliest available version was published on {}.",
+                        timestamp.cyan()
+                    )
+                } else {
+                    String::new()
+                };
+
                 if *per_package {
                     write!(
                         f,
                         "{}{} `{}` was filtered by `{}` to only include packages uploaded \
-                        before {}. Consider removing the setting or updating it to a later date.",
+                        before {}.{earliest} Consider removing the setting or updating it to a later date.",
                         "hint".bold().cyan(),
                         ":".bold(),
                         package.cyan(),
@@ -1867,7 +1924,7 @@ impl std::fmt::Display for PubGrubHint {
                     write!(
                         f,
                         "{}{} `{}` was filtered by `{}` to only include packages uploaded \
-                        before {}. Consider using `{}` to override the cutoff for this package.",
+                        before {}.{earliest} Consider using `{}` to override the cutoff for this package.",
                         "hint".bold().cyan(),
                         ":".bold(),
                         package.cyan(),
